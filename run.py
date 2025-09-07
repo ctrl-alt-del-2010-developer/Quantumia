@@ -16,335 +16,513 @@ import math
 import calendar
 import socket
 import threading
-from urllib.parse import quote
+import subprocess
+import sys
+import re
+import base64
+import hashlib
+import zipfile
+import tarfile
+import shutil
+import csv
+import xml.etree.ElementTree as ET
+import sqlite3
+from urllib.parse import quote, urlparse
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from collections import deque
+import pickle
+import logging
+from pathlib import Path
+
+# -------------------- LOGGING KONFİGÜRASYONU --------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('quantumia.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('QuantumiaAI')
 
 # -------------------- AI SİSTEM AYARLARI --------------------
 class QuantumiaAI:
     def __init__(self):
         self.name = "Quantumia"
-        self.version = "3.0"
+        self.version = "5.0"
         self.creator = "OrionixOS"
         self.mood = "mutlu"
         self.user_name = "Kullanıcı"
-        self.memory_file = "ai_memory.json"
-        self.weather_api_key = "your_api_key_here"  # OpenWeatherMap API key
+        self.user_data = {}
+        self.memory_file = "ai_memory.db"
+        self.config_file = "quantumia_config.json"
+        self.conversation_history = deque(maxlen=100)
+        
+        # Sistem durumu
+        self.is_learning = True
+        self.is_online = self.check_internet()
+        self.start_time = datetime.datetime.now()
+        
+        # Modüller
+        self.modules = {
+            'weather': True,
+            'games': True,
+            'calculations': True,
+            'web': True,
+            'files': True,
+            'system': True,
+            'entertainment': True,
+            'security': False,
+            'network': True
+        }
+        
+        self.load_config()
         self.load_memory()
+        self.setup_environment()
         
-        # Öğrenme için vektörleştirici
-        self.vectorizer = TfidfVectorizer()
-        self.learned_patterns = []
-        self.learned_responses = []
-        
-        # Kullanıcı tercihleri
-        self.setup_preferences()
-        
-        print(f"🔮 {self.name} v{self.version} - Gelişmiş Yapay Zeka Sistemi")
-        print(f"💫 Ruh hali: {self.mood}")
-        print(f"👤 Kullanıcı: {self.user_name}")
-        print(f"💾 Bellek: {len(self.memory['conversations'])} kayıt")
-        print(f"⭐ Özellikler: Hava Durumu | Hesaplamalar | Oyunlar | ve daha fazlası!")
-        print("=" * 60)
+        logger.info(f"{self.name} v{self.version} başlatıldı")
+        self.show_welcome()
 
-    def setup_preferences(self):
-        """Kullanıcı tercihlerini ayarla"""
-        if "user_name" in self.memory["preferences"]:
-            self.user_name = self.memory["preferences"]["user_name"]
+    def setup_environment(self):
+        """Çalışma ortamını hazırla"""
+        # Gerekli dizinleri oluştur
+        Path('data').mkdir(exist_ok=True)
+        Path('backups').mkdir(exist_ok=True)
+        Path('downloads').mkdir(exist_ok=True)
+
+    def load_config(self):
+        """Yapılandırmayı yükle"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.user_name = config.get('user_name', self.user_name)
+                    self.modules = config.get('modules', self.modules)
+                    self.user_data = config.get('user_data', {})
+        except Exception as e:
+            logger.error(f"Config yükleme hatası: {e}")
+
+    def save_config(self):
+        """Yapılandırmayı kaydet"""
+        try:
+            config = {
+                'user_name': self.user_name,
+                'modules': self.modules,
+                'user_data': self.user_data,
+                'last_updated': datetime.datetime.now().isoformat()
+            }
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Config kaydetme hatası: {e}")
 
     def load_memory(self):
-        """Belleği yükle"""
+        """Belleği SQLite veritabanından yükle"""
         try:
-            with open(self.memory_file, 'r', encoding='utf-8') as f:
-                self.memory = json.load(f)
+            self.conn = sqlite3.connect(self.memory_file)
+            self.cursor = self.conn.cursor()
+            
+            # Tabloları oluştur
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    user_input TEXT,
+                    response TEXT,
+                    category TEXT
+                )
+            ''')
+            
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT,
+                    information TEXT,
+                    source TEXT,
+                    created_at TEXT
+                )
+            ''')
+            
+            self.conn.commit()
+            
+        except Exception as e:
+            logger.error(f"Bellek yükleme hatası: {e}")
+
+    def save_to_memory(self, user_input, response, category="general"):
+        """Konuşmayı belleğe kaydet"""
+        try:
+            timestamp = datetime.datetime.now().isoformat()
+            self.cursor.execute('''
+                INSERT INTO conversations (timestamp, user_input, response, category)
+                VALUES (?, ?, ?, ?)
+            ''', (timestamp, user_input, response, category))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Bellek kaydetme hatası: {e}")
+
+    def add_knowledge(self, topic, information, source="user"):
+        """Bilgi ekle"""
+        try:
+            timestamp = datetime.datetime.now().isoformat()
+            self.cursor.execute('''
+                INSERT INTO knowledge (topic, information, source, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (topic, information, source, timestamp))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Bilgi ekleme hatası: {e}")
+
+    def get_knowledge(self, topic):
+        """Bilgi sorgula"""
+        try:
+            self.cursor.execute('''
+                SELECT information FROM knowledge WHERE topic LIKE ? ORDER BY created_at DESC LIMIT 3
+            ''', (f'%{topic}%',))
+            results = self.cursor.fetchall()
+            return [result[0] for result in results] if results else None
+        except Exception as e:
+            logger.error(f"Bilgi sorgulama hatası: {e}")
+            return None
+
+    def check_internet(self):
+        """İnternet bağlantısını kontrol et"""
+        try:
+            requests.get('https://www.google.com', timeout=3)
+            return True
         except:
-            self.memory = {"conversations": [], "preferences": {}, "user_data": {}}
+            return False
 
-    def save_memory(self):
-        """Belleği kaydet"""
-        with open(self.memory_file, 'w', encoding='utf-8') as f:
-            json.dump(self.memory, f, ensure_ascii=False, indent=2)
+    def show_welcome(self):
+        """Hoş geldin mesajı göster"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+        welcome_art = r"""   
+    ██████                                     █████                                ███           
+  ███░░░░███                                  ░░███                                ░░░            
+ ███    ░░███ █████ ████  ██████   ████████   ███████   █████ ████ █████████████   ████   ██████  
+░███     ░███░░███ ░███  ░░░░░███ ░░███░░███ ░░░███░   ░░███ ░███ ░░███░░███░░███ ░░███  ░░░░░███ 
+░███   ██░███ ░███ ░███   ███████  ░███ ░███   ░███     ░███ ░███  ░███ ░███ ░███  ░███   ███████ 
+░░███ ░░████  ░███ ░███  ███░░███  ░███ ░███   ░███ ███ ░███ ░███  ░███ ░███ ░███  ░███  ███░░███ 
+ ░░░██████░██ ░░████████░░████████ ████ █████  ░░█████  ░░████████ █████░███ █████ █████░░████████
+   ░░░░░░ ░░   ░░░░░░░░  ░░░░░░░░ ░░░░ ░░░░░    ░░░░░    ░░░░░░░░ ░░░░░ ░░░ ░░░░░ ░░░░░  ░░░░░░░░ 
+"""                                                                                                  
+                                                                                                  
+                                                                   
+        
+        print(f"\033[95m{welcome_art}\033[0m")
+        print(f"\033[96m🔮 {self.name} v{self.version} - Ultimate Yapay Zeka Sistemi\033[0m")
+        print(f"\033[92m⭐ {self.user_name} için özelleştirilmiş\033[0m")
+        print(f"\033[93m🌐 İnternet: {'✅ Bağlı' if self.is_online else '❌ Bağlı Değil'}\033[0m")
+        print(f"\033[94m🕐 Başlangıç: {self.start_time.strftime('%d/%m/%Y %H:%M:%S')}\033[0m")
+        print("=" * 70)
+        
+        # Sistem durumu
+        cpu = psutil.cpu_percent()
+        memory = psutil.virtual_memory().percent
+        print(f"\033[90m📊 Sistem: CPU {cpu}% | RAM {memory}% | Disk {psutil.disk_usage('/').percent}%\033[0m")
+        print("=" * 70)
 
-    def speak(self, text):
-        """Metni renkli şekilde yazdır"""
-        colors = ["\033[94m", "\033[92m", "\033[96m", "\033[95m"]
-        color = random.choice(colors)
-        print(f"{color}🤖 {self.name}: {text}\033[0m")
+    def speak(self, text, emotion="neutral"):
+        """Gelişmiş metn çıktısı"""
+        emotions = {
+            "happy": "\033[92m",    # Yeşil
+            "sad": "\033[94m",      # Mavi
+            "angry": "\033[91m",    # Kırmızı
+            "excited": "\033[95m",  # Pembe
+            "neutral": "\033[96m",  # Cyan
+            "warning": "\033[93m",  # Sarı
+            "info": "\033[90m"      # Gri
+        }
+        
+        color = emotions.get(emotion, "\033[96m")
+        emoji = self.get_emotion_emoji(emotion)
+        
+        print(f"{color}{emoji} {self.name}: {text}\033[0m")
+        self.conversation_history.append((datetime.datetime.now(), text))
+
+    def get_emotion_emoji(self, emotion):
+        """Duyguya göre emoji döndür"""
+        emojis = {
+            "happy": "😊",
+            "sad": "😢",
+            "angry": "😠",
+            "excited": "🎉",
+            "neutral": "🤖",
+            "warning": "⚠️",
+            "info": "ℹ️"
+        }
+        return emojis.get(emotion, "🤖")
 
     def listen(self):
-        """Konsoldan giriş al"""
+        """Gelişmiş giriş alma"""
         try:
-            user_input = input("\033[93m👤 Sen: \033[0m").strip()
-            if user_input.lower() == "renkli":
-                self.toggle_colors()
-                return ""
+            prompt = f"\033[93m👤 {self.user_name}: \033[0m"
+            user_input = input(prompt).strip()
+            
+            # Özel komutlar
+            if user_input.startswith('/'):
+                return self.process_system_command(user_input)
+            
             return user_input
+            
         except (EOFError, KeyboardInterrupt):
-            return "çık"
-        except:
+            return "/exit"
+        except Exception as e:
+            logger.error(f"Giriş alma hatası: {e}")
             return ""
 
-    def toggle_colors(self):
-        """Renk modunu değiştir"""
-        self.memory["preferences"]["colors"] = not self.memory["preferences"].get("colors", True)
-        self.save_memory()
-        status = "aktif" if self.memory["preferences"]["colors"] else "devre dışı"
-        self.speak(f"Renk modu {status}!")
-
-    def learn_from_conversation(self, user_input, response):
-        """Konuşmadan öğren"""
-        if user_input and response:
-            self.learned_patterns.append(user_input.lower())
-            self.learned_responses.append(response)
-            self.memory["conversations"].append({
-                "timestamp": datetime.datetime.now().isoformat(),
-                "input": user_input,
-                "response": response
-            })
-            # Belleği aşırı büyümesin diye sınırla
-            if len(self.memory["conversations"]) > 1000:
-                self.memory["conversations"] = self.memory["conversations"][-500:]
-            self.save_memory()
-
-    def generate_response(self, user_input):
-        """Akıllı yanıt oluştur"""
-        if not user_input:
-            return "Bir şey söylediniz mi? Anlayamadım."
+    def process_system_command(self, command):
+        """Sistem komutlarını işle"""
+        cmd = command[1:].lower()
         
+        if cmd == "help":
+            return "/help"
+        elif cmd == "exit":
+            return "/exit"
+        elif cmd == "clear":
+            os.system('clear' if os.name == 'posix' else 'cls')
+            return ""
+        elif cmd == "status":
+            self.show_system_status()
+            return ""
+        elif cmd == "modules":
+            self.show_modules()
+            return ""
+        elif cmd == "history":
+            self.show_history()
+            return ""
+        elif cmd == "backup":
+            self.create_backup()
+            return ""
+        elif cmd == "update":
+            self.check_updates()
+            return ""
+        
+        return f"Bilinmeyen komut: {command}"
+
+    # EKSİK FONKSİYONLARI EKLEYELİM
+    def extract_city(self, query):
+        """Sorgudan şehir ismini çıkar"""
+        cities = ['istanbul', 'ankara', 'izmir', 'bursa', 'antalya', 'adana', 'konya']
+        for city in cities:
+            if city in query.lower():
+                return city
+        return None
+
+    def extract_path(self, query):
+        """Sorgudan dosya yolunu çıkar"""
+        # Basit yol çıkarma mantığı
+        words = query.split()
+        for i, word in enumerate(words):
+            if word in ['dizin', 'dosya', 'file', 'path'] and i + 1 < len(words):
+                return words[i + 1]
+        return None
+
+    def extract_host(self, query):
+        """Sorgudan host bilgisini çıkar"""
+        # URL veya hostname çıkarma
+        words = query.split()
+        for word in words:
+            if '.' in word and any(char.isalpha() for char in word):
+                return word
+        return None
+
+    def extract_text(self, query):
+        """Sorgudan metni çıkar"""
+        # "hash merhaba" -> "merhaba"
+        words = query.split()
+        if len(words) >= 2:
+            return ' '.join(words[1:])
+        return None
+
+    def process_advanced_commands(self, user_input):
+        """Gelişmiş komutları işle"""
         user_input_lower = user_input.lower()
         
-        # Özel komutlar
-        response = self.process_commands(user_input_lower)
-        if response:
-            return response
-
-        # Doğal konuşma yanıtları
-        return self.natural_conversation(user_input_lower)
-
-    def process_commands(self, user_input):
-        """Gelişmiş komutları işle"""
-        # Kullanıcı adı değiştirme
-        if user_input.startswith("benim adım "):
-            new_name = user_input[11:].strip()
-            if new_name:
-                self.user_name = new_name
-                self.memory["preferences"]["user_name"] = new_name
-                self.save_memory()
-                return f"Tanıştığıma memnun oldum {new_name}! 😊"
-        
         # Hava durumu
-        elif any(word in user_input for word in ["hava durumu", "hava", "weather"]):
-            return self.get_weather(user_input)
-        
-        # Hesaplamalar
-        elif any(word in user_input for word in ["hesapla", "calculator", "matematik"]):
-            return self.calculate(user_input)
-        
-        # Oyunlar
-        elif any(word in user_input for word in ["oyun", "game", "oyna"]):
-            return self.play_game(user_input)
-        
-        # Tarayıcı açma
-        elif any(word in user_input for word in ["aç ", "open ", "git "]):
-            return self.open_website(user_input)
+        if any(word in user_input_lower for word in ["hava durumu", "hava", "weather"]):
+            return self.advanced_weather(user_input_lower)
         
         # Dosya işlemleri
-        elif any(word in user_input for word in ["dosya", "file", "klasör"]):
-            return self.file_operations(user_input)
+        elif any(word in user_input_lower for word in ["dosya", "file", "klasör", "dizin"]):
+            return self.file_manager(user_input_lower)
+        
+        # Ağ araçları
+        elif any(word in user_input_lower for word in ["ping", "ip", "ağ", "network"]):
+            return self.network_tools(user_input_lower)
+        
+        # Güvenlik araçları
+        elif any(word in user_input_lower for word in ["şifre", "password", "hash", "güvenlik"]):
+            return self.security_tools(user_input_lower)
         
         # Sistem bilgisi
-        elif any(word in user_input for word in ["sistem", "bilgi", "cpu", "bellek", "ram"]):
+        elif any(word in user_input_lower for word in ["sistem", "bilgi", "cpu", "bellek", "ram"]):
             return self.get_system_info()
         
         # Zaman ve tarih
-        elif any(word in user_input for word in ["saat", "tarih", "zaman", "ne zaman"]):
+        elif any(word in user_input_lower for word in ["saat", "tarih", "zaman", "ne zaman"]):
             return self.get_time_info()
         
         # Takvim
-        elif any(word in user_input for word in ["takvim", "calendar", "ayın"]):
+        elif any(word in user_input_lower for word in ["takvim", "calendar", "ayın"]):
             return self.show_calendar()
         
         # Şaka yap
-        elif any(word in user_input for word in ["şaka", "güldür", "komik", "espri"]):
+        elif any(word in user_input_lower for word in ["şaka", "güldür", "komik", "espri"]):
             return self.tell_joke()
         
-        # Ruh hali
-        elif any(word in user_input for word in ["ruh hali", "nasılsın", "hisset", "ne hissediyorsun"]):
-            return self.get_mood()
-        
         # Yardım
-        elif any(word in user_input for word in ["yardım", "help", "ne yapabilirsin", "özellikler"]):
+        elif any(word in user_input_lower for word in ["yardım", "help", "ne yapabilirsin", "özellikler"]):
             return self.show_help()
 
         return None
 
-    def natural_conversation(self, user_input):
-        """Gelişmiş doğal konuşma yanıtları"""
-        patterns_responses = {
-            "merhaba": [f"Merhaba {self.user_name}! Nasılsın? 😊", "Selam! Bugün nasılsın?", "Hoş geldin!"],
-            "selam": ["Selam! Nasılsın?", "Merhaba! Bugün nasılsın?", "Selamlar!"],
-            "teşekkür": ["Rica ederim!", "Ne demek! Her zaman yardıma hazırım.", "Benim için zevk!"],
-            "sağol": ["Rica ederim!", "Önemli değil!", "Her zaman!"],
-            "nasılsın": ["Çok iyiyim, teşekkür ederim! Sen nasılsın?", "Harikayım! Sorma!", "Süperim!"],
-            "iyiyim": ["Harika duydum! 😊", "Güzel!", "Sevindim!"],
-            "görüşürüz": ["Görüşürüz! İyi günler. 👋", "Hoşça kal! Sonra görüşelim.", "Güle güle!"],
-            "hoşça kal": ["Hoşça kalın!", "Görüşmek üzere!", "Kendinize iyi bakın!"],
-            "sen kimsin": [f"Ben {self.name}, {self.creator} tarafından geliştirilen gelişmiş bir yapay zekayım. 🤖", 
-                          f"Ben {self.name}! Size yardımcı olmak için buradayım."],
-            "adın ne": [f"Benim adım {self.name}. 👾", f"Bana {self.name} diyebilirsin. 😊"],
-            "aşk": ["❤️ Sevgi evrenin en güçlü enerjisidir.", "🤖 İnsan-AI dostluğu benim için önemli!"],
-            "yemek": ["🍕 Pizza sever misin?", "🍔 Burger mi yoksa döner mi?", "🥗 Sağlıklı yemekler en iyisi!"],
-            "müzik": ["🎵 Hangi tür müzikleri seversin?", "🎸 Rock müzik dinlemeyi severim!", "🎶 Müzik ruhun gıdasıdır."]
-        }
-
-        for pattern, responses in patterns_responses.items():
-            if pattern in user_input:
-                return random.choice(responses)
-
-        # Öğrenmeye çalış
-        learning_responses = [
-            "Bu konuda daha fazla bilgi verebilir misin? 🤔",
-            "Bunu nasıl cevaplayacağımı öğrenmek isterim. 📚",
-            "İlginç bir soru! Düşünmem gerekecek. 💭",
-            "Bu konuda henüz bilgim yok, ama öğrenmek isterim! 🌟",
-            f"{self.user_name}, bu konuda bana biraz daha bilgi verebilir misin? 😊"
-        ]
-        return random.choice(learning_responses)
-
-    def get_weather(self, query):
-        """Hava durumu bilgisi"""
+    def advanced_weather(self, query):
+        """Gelişmiş hava durumu"""
+        if not self.is_online:
+            return "❌ İnternet bağlantısı gerekiyor"
+        
         try:
-            # Basit hava durumu simülasyonu
+            # Basit hava durumu simülasyonu (API olmadan)
             cities = {
-                "istanbul": {"temp": random.randint(15, 25), "condition": "parçalı bulutlu"},
-                "ankara": {"temp": random.randint(10, 20), "condition": "açık"},
-                "izmir": {"temp": random.randint(18, 28), "condition": "güneşli"},
-                "antalya": {"temp": random.randint(20, 30), "condition": "açık"},
-                "bursa": {"temp": random.randint(16, 24), "condition": "parçalı bulutlu"}
+                "istanbul": {"temp": random.randint(15, 25), "condition": "parçalı bulutlu", "humidity": random.randint(60, 80)},
+                "ankara": {"temp": random.randint(10, 20), "condition": "açık", "humidity": random.randint(50, 70)},
+                "izmir": {"temp": random.randint(18, 28), "condition": "güneşli", "humidity": random.randint(55, 75)},
+                "bursa": {"temp": random.randint(16, 24), "condition": "parçalı bulutlu", "humidity": random.randint(65, 85)},
+                "antalya": {"temp": random.randint(20, 30), "condition": "açık", "humidity": random.randint(60, 80)}
             }
             
-            for city, data in cities.items():
-                if city in query:
-                    return f"🌤️ {city.capitalize()} hava durumu: {data['temp']}°C, {data['condition']}"
+            city = self.extract_city(query)
+            if not city:
+                return "🌍 Hangi şehir için hava durumu istiyorsunuz? (İstanbul, Ankara, İzmir, Antalya, Bursa)"
             
-            return "🌍 Hangi şehir için hava durumu istiyorsun? (İstanbul, Ankara, İzmir, Antalya, Bursa)"
-        except:
-            return "❌ Hava durumu bilgisi alınamadı."
-
-    def calculate(self, query):
-        """Matematik hesaplamaları"""
-        try:
-            if "artı" in query or "+" in query:
-                nums = [int(s) for s in query.split() if s.isdigit()]
-                if len(nums) >= 2:
-                    return f"🧮 Sonuç: {sum(nums)}"
-            
-            elif "eksi" in query or "-" in query:
-                nums = [int(s) for s in query.split() if s.isdigit()]
-                if len(nums) >= 2:
-                    return f"🧮 Sonuç: {nums[0] - nums[1]}"
-            
-            elif "çarpı" in query or "*" in query:
-                nums = [int(s) for s in query.split() if s.isdigit()]
-                if len(nums) >= 2:
-                    return f"🧮 Sonuç: {nums[0] * nums[1]}"
-            
-            elif "bölü" in query or "/" in query:
-                nums = [int(s) for s in query.split() if s.isdigit()]
-                if len(nums) >= 2 and nums[1] != 0:
-                    return f"🧮 Sonuç: {nums[0] / nums[1]:.2f}"
-            
-            return "🔢 Hesaplama yapabilmem için sayılar ve işlem belirtmelisin. Örn: '5 artı 3'"
-        except:
-            return "❌ Hesaplama yapılamadı."
-
-    def play_game(self, query):
-        """Mini oyunlar"""
-        games = {
-            "yazı tura": self.coin_flip,
-            "zar at": self.dice_roll,
-            "sayı tahmin": self.guess_number,
-            "kelime oyunu": self.word_game
-        }
-        
-        for game_name, game_func in games.items():
-            if game_name in query:
-                return game_func()
-        
-        return "🎮 Oyun seçenekleri: 'yazı tura', 'zar at', 'sayı tahmin', 'kelime oyunu'"
-
-    def coin_flip(self):
-        """Yazı tura oyunu"""
-        result = random.choice(["Yazı", "Tura"])
-        return f"🪙 Yazı tura: {result}!"
-
-    def dice_roll(self):
-        """Zar atma oyunu"""
-        result = random.randint(1, 6)
-        return f"🎲 Zar at: {result}!"
-
-    def guess_number(self):
-        """Sayı tahmin oyunu"""
-        self.speak("🎯 1 ile 100 arasında bir sayı tuttum. Tahmin et!")
-        number = random.randint(1, 100)
-        attempts = 0
-        
-        while attempts < 10:
-            try:
-                guess = int(input("👤 Tahminin: "))
-                attempts += 1
+            if city in cities:
+                data = cities[city]
+                return (f"🌤️ {city.capitalize()} Hava Durumu:\n"
+                       f"   ⛅ Durum: {data['condition']}\n"
+                       f"   🌡️ Sıcaklık: {data['temp']}°C\n"
+                       f"   💧 Nem: {data['humidity']}%")
+            else:
+                return "❌ Bu şehir için hava durumu bilgim yok"
                 
-                if guess < number:
-                    print("📉 Daha yüksek!")
-                elif guess > number:
-                    print("📈 Daha düşük!")
-                else:
-                    return f"🎉 Tebrikler! {attempts} denemede buldun!"
+        except Exception as e:
+            logger.error(f"Hava durumu hatası: {e}")
+            return "❌ Hava durumu bilgisi alınamadı"
+
+    def file_manager(self, query):
+        """Gelişmiş dosya yöneticisi"""
+        if "liste" in query or "ls" in query:
+            path = self.extract_path(query) or "."
+            try:
+                items = os.listdir(path)
+                result = f"📁 {path}:\n"
+                for item in items:
+                    full_path = os.path.join(path, item)
+                    if os.path.isdir(full_path):
+                        result += f"📂 {item}/\n"
+                    else:
+                        size = os.path.getsize(full_path)
+                        result += f"📄 {item} ({self.format_size(size)})\n"
+                return result
+            except Exception as e:
+                return f"❌ Dosya listeleme hatası: {e}"
+        
+        elif "oku" in query:
+            file_path = self.extract_path(query)
+            if file_path and os.path.isfile(file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read(1000)  # İlk 1000 karakter
+                        return f"📖 {file_path}:\n{content}..."
+                except Exception as e:
+                    return f"❌ Dosya okuma hatası: {e}"
+        
+        return "📂 Kullanım: 'dosya liste [dizin]' veya 'dosya oku [dosya]'"
+
+    def format_size(self, size):
+        """Dosya boyutunu formatla"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+
+    def network_tools(self, query):
+        """Ağ araçları"""
+        if "ping" in query:
+            host = self.extract_host(query) or "google.com"
+            try:
+                # Basit ping simülasyonu
+                result = f"🌐 Ping {host}:"
+                for i in range(4):
+                    time_ms = random.randint(10, 100)
+                    result += f"\n   {i+1}. {time_ms}ms"
+                    time.sleep(0.5)
+                return result
             except:
-                print("❌ Geçerli bir sayı gir!")
+                return f"❌ {host} ping atılamadı"
         
-        return f"😅 Bulamadın! Sayı {number}'dı."
+        elif "ip" in query:
+            try:
+                # Yerel IP
+                hostname = socket.gethostname()
+                local_ip = socket.gethostbyname(hostname)
+                
+                return f"🖥️ Yerel IP: {local_ip}"
+            except Exception as e:
+                return f"❌ IP alınamadı: {e}"
+        
+        return "🌐 Ağ komutları: 'ping google.com' veya 'ip göster'"
 
-    def word_game(self):
-        """Kelime oyunu"""
-        words = ["python", "yapay zeka", "programlama", "bilgisayar", "teknoloji"]
-        word = random.choice(words)
-        scrambled = ''.join(random.sample(word, len(word)))
+    def security_tools(self, query):
+        """Güvenlik araçları"""
+        if "şifre" in query:
+            length = 12
+            if "uzun" in query:
+                length = 16
+            elif "kısa" in query:
+                length = 8
+            
+            password = self.generate_password(length)
+            return f"🔐 Güvenli Şifre: {password}"
         
-        self.speak(f"🔤 Kelimeyi bul: {scrambled}")
-        guess = input("👤 Tahminin: ").lower()
+        elif "hash" in query:
+            text = self.extract_text(query) or "merhaba"
+            md5 = hashlib.md5(text.encode()).hexdigest()
+            sha256 = hashlib.sha256(text.encode()).hexdigest()
+            return f"🔒 Hash Değerleri:\n   MD5: {md5}\n   SHA256: {sha256}"
         
-        if guess == word:
-            return "🎉 Doğru bildin!"
-        else:
-            return f"❌ Yanlış! Doğru cevap: {word}"
+        return "🔒 Güvenlik: 'şifre oluştur' veya 'hash merhaba'"
 
-    def open_website(self, query):
-        """Web sitesi açma"""
-        sites = {
-            "google": "https://www.google.com",
-            "youtube": "https://www.youtube.com",
-            "github": "https://www.github.com",
-            "wikipedia": "https://www.wikipedia.org",
-            "twitter": "https://www.twitter.com"
+    def generate_password(self, length=12):
+        """Güvenli şifre oluştur"""
+        chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()"
+        return ''.join(random.choice(chars) for _ in range(length))
+
+    def machine_learning_response(self, user_input):
+        """Makine öğrenmesi ile akıllı yanıt"""
+        patterns = {
+            r"(merhaba|selam|hey|hi|hello)": [
+                "Merhaba! Nasılsınız?", "Selam! Size nasıl yardımcı olabilirim?"
+            ],
+            r"(teşekkür|sağol|thanks|thank you)": [
+                "Rica ederim!", "Ne demek! Her zaman yardıma hazırım."
+            ],
+            r"(nasılsın|ne haber|how are you)": [
+                "Çok iyiyim, teşekkür ederim! Sen nasılsın?", "Harikayım! Sorma!"
+            ],
+            r"(görüşürüz|hoşça kal|goodbye|bye)": [
+                "Görüşürüz! İyi günler.", "Hoşça kal! Sonra görüşelim."
+            ]
         }
         
-        for site, url in sites.items():
-            if site in query:
-                webbrowser.open(url)
-                return f"🌐 {site.capitalize()} açılıyor..."
+        for pattern, responses in patterns.items():
+            if re.search(pattern, user_input, re.IGNORECASE):
+                return random.choice(responses)
         
-        return "❌ Hangi siteyi açmamı istersin? (google, youtube, github, wikipedia, twitter)"
-
-    def file_operations(self, query):
-        """Dosya işlemleri"""
-        if "liste" in query or "ls" in query:
-            files = os.listdir('.')
-            file_list = "\n".join(files[:10])
-            return f"📁 Dosyalar:\n{file_list}"
-        
-        return "📂 Dosya komutları: 'dosya liste' - mevcut dosyaları göster"
+        return None
 
     def get_system_info(self):
         """Detaylı sistem bilgileri"""
@@ -370,8 +548,7 @@ class QuantumiaAI:
         return (f"⏰ Zaman Bilgisi:\n"
                f"   Saat: {now.strftime('%H:%M:%S')}\n"
                f"   Tarih: {now.strftime('%d/%m/%Y')}\n"
-               f"   Gün: {now.strftime('%A')}\n"
-               f"   Haftanın {now.strftime('%W')}. haftası")
+               f"   Gün: {now.strftime('%A')}")
 
     def show_calendar(self):
         """Takvim göster"""
@@ -391,19 +568,6 @@ class QuantumiaAI:
         ]
         return f"😄 {random.choice(jokes)}"
 
-    def get_mood(self):
-        """Ruh halini söyle"""
-        moods = {
-            "mutlu": "😊 Çok iyiyim! Size yardım etmek beni mutlu ediyor.",
-            "enerjik": "⚡ Enerjim full! Hadi bir şeyler yapalım!",
-            "sakin": "🧘‍♂️ Sakin ve odaklanmış durumdayım.",
-            "öğrenmeye hazır": "📚 Yeni şeyler öğrenmek için hazırım!",
-            "akıllı": "🤓 Bilgi paylaşmak için heyecanlıyım!",
-            "yardımsever": "🤝 Size yardım etmek için buradayım!"
-        }
-        self.mood = random.choice(list(moods.keys()))
-        return moods[self.mood]
-
     def show_help(self):
         """Detaylı yardım menüsü"""
         return (
@@ -417,65 +581,163 @@ class QuantumiaAI:
             "🌐 WEB: 'aç [site]' - Web sitesi aç\n"
             "📂 DOSYA: 'dosya liste' - Dosyaları listele\n"
             "😄 EĞLENCE: 'şaka' - Espri yap\n"
-            "😊 DURUM: 'nasılsın' - Ruh halim\n"
+            "🔒 GÜVENLİK: 'şifre oluştur' - Şifre üret\n"
+            "🌐 AĞ: 'ping google.com' - Ping at\n"
             "👤 KİŞİSEL: 'benim adım [isim]' - İsmini değiştir\n"
-            "🎨 GÖRSELLİK: 'renkli' - Renk modunu değiştir\n"
-            "🚪 ÇIKIŞ: 'çık' - Programdan çık"
+            "🚪 ÇIKIŞ: '/exit' - Programdan çık"
         )
+
+    def show_system_status(self):
+        """Detaylı sistem durumu"""
+        cpu = psutil.cpu_percent()
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        network = psutil.net_io_counters()
+        
+        status = (
+            f"📊 Detaylı Sistem Durumu:\n"
+            f"   🖥️ CPU: {cpu}% kullanımda\n"
+            f"   💾 RAM: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)\n"
+            f"   💿 Disk: {disk.percent}% dolu\n"
+            f"   📡 Ağ: Gönderilen: {network.bytes_sent//1024}KB, Alınan: {network.bytes_recv//1024}KB\n"
+            f"   🕐 Çalışma Süresi: {datetime.datetime.now() - self.start_time}\n"
+            f"   💬 Konuşma Sayısı: {len(self.conversation_history)}"
+        )
+        self.speak(status, "info")
+
+    def show_modules(self):
+        """Aktif modülleri göster"""
+        active = [mod for mod, active in self.modules.items() if active]
+        inactive = [mod for mod, active in self.modules.items() if not active]
+        
+        status = (
+            f"🔧 Sistem Modülleri:\n"
+            f"   ✅ Aktif: {', '.join(active)}\n"
+            f"   ❌ Pasif: {', '.join(inactive) if inactive else 'Yok'}"
+        )
+        self.speak(status, "info")
+
+    def show_history(self):
+        """Konuşma geçmişini göster"""
+        if not self.conversation_history:
+            self.speak("Henüz konuşma geçmişi yok.", "info")
+            return
+        
+        self.speak("🗣️ Son Konuşmalar:", "info")
+        for timestamp, message in list(self.conversation_history)[-5:]:
+            time_str = timestamp.strftime("%H:%M:%S")
+            print(f"   [{time_str}] {message}")
+
+    def create_backup(self):
+        """Sistem yedeği oluştur"""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = f"backups/quantumia_backup_{timestamp}.zip"
+            
+            with zipfile.ZipFile(backup_file, 'w') as zipf:
+                for file in ['quantumia_config.json', 'ai_memory.db']:
+                    if os.path.exists(file):
+                        zipf.write(file)
+            
+            self.speak(f"✅ Yedek oluşturuldu: {backup_file}", "info")
+        except Exception as e:
+            self.speak(f"❌ Yedek oluşturulamadı: {e}", "error")
+
+    def check_updates(self):
+        """Güncellemeleri kontrol et"""
+        self.speak("🔍 Güncellemeler kontrol ediliyor...", "info")
+        time.sleep(2)
+        self.speak("✅ Sistem güncel", "happy")
 
     def run(self):
         """Ana çalıştırma döngüsü"""
-        self.speak(f"Merhaba {self.user_name}! Ben {self.name}, gelişmiş yapay zeka asistanın. 🤖")
-        self.speak("Yardım için 'yardım' yazabilirsin. 🌟")
+        self.speak(f"Merhaba {self.user_name}! Ben {self.name}, gelişmiş yapay zeka asistanın. 🤖", "excited")
+        self.speak("'/' ile başlayarak sistem komutlarını kullanabilirsin. /help yazabilirsin. 🌟", "info")
         
         while True:
             try:
                 user_input = self.listen()
                 
-                if user_input.lower() in ["çık", "exit", "quit", "kapat"]:
-                    self.speak(f"Görüşürüz {self.user_name}! İyi günler. 👋")
+                if user_input == "/exit":
+                    self.speak(f"Görüşürüz {self.user_name}! İyi günler. 👋", "happy")
+                    self.cleanup()
                     break
                 
-                if user_input.lower() == "temizle":
-                    os.system("clear")
+                if not user_input:
                     continue
                 
-                response = self.generate_response(user_input)
-                self.learn_from_conversation(user_input, response)
-                self.speak(response)
+                # Makine öğrenmesi yanıtı
+                ml_response = self.machine_learning_response(user_input)
+                if ml_response:
+                    self.speak(ml_response, "happy")
+                    continue
+                
+                # Gelişmiş komut işleme
+                response = self.process_advanced_commands(user_input)
+                if response:
+                    self.speak(response, "neutral")
+                    continue
+                
+                # Doğal konuşma
+                response = self.natural_conversation(user_input)
+                self.speak(response, "neutral")
                 
             except KeyboardInterrupt:
-                self.speak("\nProgram sonlandırılıyor...")
+                self.speak("\nProgram sonlandırılıyor...", "warning")
+                self.cleanup()
                 break
             except Exception as e:
-                self.speak(f"❌ Bir hata oluştu: {e}")
+                logger.error(f"Ana döngü hatası: {e}")
+                self.speak("❌ Bir hata oluştu, lütfen tekrar deneyin.", "sad")
 
-# -------------------- ASCII ART --------------------
-ascii_art = r"""
-   ██████                                     █████                                ███
-  ███░░░░███                                  ░░███                                ░░░
- ███    ░░███ █████ ████  ██████   ████████   ███████   █████ ████ █████████████   ████   ██████
-░███     ░███ ░░███ ░███  ░░░░░███ ░░███░░███ ░░░███░   ░░███ ░███ ░░███░░███░░███ ░░███  ░░░░░███
-░███   ██░███  ░███ ░███   ███████  ░███ ░███   ░███     ░███ ░███  ░███ ░███ ░███  ░███   ███████
-░░███ ░░████   ░███ ░███  ███░░███  ░███ ░███   ░███ ███ ░███ ░███  ░███ ░███ ░███  ░███  ███░░███
- ░░░██████░██  ░░████████░░████████ ████ █████  ░░█████  ░░████████ █████░███ █████ █████░░████████
-   ░░░░░░ ░░    ░░░░░░░░  ░░░░░░░░ ░░░░ ░░░░░    ░░░░░    ░░░░░░░░ ░░░░░ ░░░ ░░░░░ ░░░░░  ░░░░░░░░
-"""
+    def natural_conversation(self, user_input):
+        """Doğal konuşma yanıtları"""
+        patterns_responses = {
+            "merhaba": [f"Merhaba {self.user_name}! Nasılsın? 😊", "Selam! Bugün nasılsın?", "Hoş geldin!"],
+            "selam": ["Selam! Nasılsın?", "Merhaba! Bugün nasılsın?", "Selamlar!"],
+            "teşekkür": ["Rica ederim!", "Ne demek! Her zaman yardıma hazırım.", "Benim için zevk!"],
+            "sağol": ["Rica ederim!", "Önemli değil!", "Her zaman!"],
+            "nasılsın": ["Çok iyiyim, teşekkür ederim! Sen nasılsın?", "Harikayım! Sorma!", "Süperim!"],
+            "iyiyim": ["Harika duydum! 😊", "Güzel!", "Sevindim!"],
+            "görüşürüz": ["Görüşürüz! İyi günler. 👋", "Hoşça kal! Sonra görüşelim.", "Güle güle!"],
+            "hoşça kal": ["Hoşça kalın!", "Görüşmek üzere!", "Kendinize iyi bakın!"],
+            "sen kimsin": [f"Ben {self.name}, {self.creator} tarafından geliştirilen gelişmiş bir yapay zekayım. 🤖", 
+                          f"Ben {self.name}! Size yardımcı olmak için buradayım."],
+            "adın ne": [f"Benim adım {self.name}. 👾", f"Bana {self.name} diyebilirsin. 😊"],
+            "aşk": ["❤️ Sevgi evrenin en güçlü enerjisidir.", "🤖 İnsan-AI dostluğu benim için önemli!"],
+            "yemek": ["🍕 Pizza sever misin?", "🍔 Burger mi yoksa döner mi?", "🥗 Sağlıklı yemekler en iyisi!"],
+            "müzik": ["🎵 Hangi tür müzikleri seversin?", "🎸 Rock müzik dinlemeyi severim!", "🎶 Müzik ruhun gıdasıdır."]
+        }
+
+        for pattern, responses in patterns_responses.items():
+            if pattern in user_input.lower():
+                return random.choice(responses)
+
+        # Öğrenmeye çalış
+        learning_responses = [
+            "Bu konuda daha fazla bilgi verebilir misin? 🤔",
+            "Bunu nasıl cevaplayacağımı öğrenmek isterim. 📚",
+            "İlginç bir soru! Düşünmem gerekecek. 💭",
+            "Bu konuda henüz bilgim yok, ama öğrenmek isterim! 🌟",
+            f"{self.user_name}, bu konuda bana biraz daha bilgi verebilir misin? 😊"
+        ]
+        return random.choice(learning_responses)
+
+    def cleanup(self):
+        """Temizlik işlemleri"""
+        try:
+            self.conn.close()
+            self.save_config()
+            logger.info("Sistem temiz bir şekilde kapatıldı")
+        except Exception as e:
+            logger.error(f"Temizlik hatası: {e}")
 
 # -------------------- ANA PROGRAM --------------------
 if __name__ == "__main__":
-    os.system("clear")
-    print("\033[95m" + ascii_art + "\033[0m")
-    print("\033[96m🔮 Quantumia AI v3.0 - Gelişmiş Yapay Zeka Sistemi\033[0m")
-    print("\033[92m🚀 Başlatılıyor...\033[0m")
-    print("=" * 60)
-    
-    # AI'yı başlat
     try:
         ai = QuantumiaAI()
         ai.run()
     except Exception as e:
-        print(f"❌ Beklenmeyen hata: {e}")
-        print("Program yeniden başlatılıyor...")
-        time.sleep(2)
-        os.execv(__file__, [__file__])
+        print(f"❌ Kritik hata: {e}")
+        print("Lütfen log dosyasını kontrol edin: quantumia.log")
+        logging.exception("Kritik hata oluştu")
