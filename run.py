@@ -46,7 +46,7 @@ def main():
             print("Quantumia: Görüşürüz!")
             break
         response = get_response(user_input)
-        print(f"Parade: {response}")
+        print(f"Quantumia: {response}")
 
 if __name__ == "__main__":
     main()
